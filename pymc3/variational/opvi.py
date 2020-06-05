@@ -1,3 +1,17 @@
+#   Copyright 2020 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
 R"""
 Variational inference is a great approach for doing really complex,
 often intractable Bayesian inference in approximate form. Common methods
@@ -6,10 +20,10 @@ reveal the true nature of underlying problem. In some applications it can
 yield unreliable decisions.
 
 Recently on NIPS 2017 `OPVI  <https://arxiv.org/abs/1610.09033/>`_ framework
-was presented. It generalizes variational inverence so that the problem is
+was presented. It generalizes variational inference so that the problem is
 build with blocks. The first and essential block is Model itself. Second is
 Approximation, in some cases :math:`log Q(D)` is not really needed. Necessity
-depends on the third and forth part of that black box, Operator and
+depends on the third and fourth part of that black box, Operator and
 Test Function respectively.
 
 Operator is like an approach we use, it constructs loss from given Model,
@@ -45,9 +59,11 @@ from .updates import adagrad_window
 from ..blocking import (
     ArrayOrdering, DictToArrayBijection, VarMap
 )
+from ..backends import NDArray, Text, SQLite, HDF5
 from ..model import modelcontext
-from ..theanof import tt_rng, memoize, change_flags, identity
+from ..theanof import tt_rng, change_flags, identity
 from ..util import get_default_varnames
+from ..memoize import WithMemoization, memoize
 
 __all__ = [
     'ObjectiveFunction',
@@ -86,10 +102,29 @@ class LocalGroupError(BatchedGroupError, AEVBInferenceError):
     """Error raised in case of bad local_rv usage"""
 
 
+def append_name(name):
+    def wrap(f):
+        if name is None:
+            return f
+
+        def inner(*args, **kwargs):
+            res = f(*args, **kwargs)
+            res.name = name
+            return res
+        return inner
+    return wrap
+
+
 def node_property(f):
     """A shortcut for wrapping method to accessible tensor
     """
-    return property(memoize(change_flags(compute_test_value='off')(f)))
+    if isinstance(f, str):
+
+        def wrapper(fn):
+            return property(memoize(change_flags(compute_test_value='off')(append_name(f)(fn)), bound=True))
+        return wrapper
+    else:
+        return property(memoize(change_flags(compute_test_value='off')(f), bound=True))
 
 
 @change_flags(compute_test_value='ignore')
@@ -124,7 +159,7 @@ def _warn_not_used(smth, where):
     warnings.warn('`%s` is not used for %s and ignored' % (smth, where))
 
 
-class ObjectiveFunction(object):
+class ObjectiveFunction:
     """Helper class for construction loss and updates for variational inference
 
     Parameters
@@ -134,7 +169,6 @@ class ObjectiveFunction(object):
     tf : :class:`TestFunction`
         OPVI TestFunction
     """
-    __hash__ = id
 
     def __init__(self, op, tf):
         self.op = op
@@ -152,23 +186,23 @@ class ObjectiveFunction(object):
 
         Parameters
         ----------
-        obj_n_mc : `int`
+        obj_n_mc : int
             Number of monte carlo samples used for approximation of objective gradients
-        tf_n_mc : `int`
+        tf_n_mc : int
             Number of monte carlo samples used for approximation of test function gradients
         obj_optimizer : function (loss, params) -> updates
             Optimizer that is used for objective params
         test_optimizer : function (loss, params) -> updates
             Optimizer that is used for test function params
-        more_obj_params : `list`
+        more_obj_params : list
             Add custom params for objective optimizer
-        more_tf_params : `list`
+        more_tf_params : list
             Add custom params for test function optimizer
-        more_updates : `dict`
+        more_updates : dict
             Add custom updates to resulting updates
-        more_replacements : `dict`
+        more_replacements : dict
             Apply custom replacements before calculating gradients
-        total_grad_norm_constraint : `float`
+        total_grad_norm_constraint : float
             Bounds gradient norm, prevents exploding gradient problem
 
         Returns
@@ -256,27 +290,27 @@ class ObjectiveFunction(object):
 
         Parameters
         ----------
-        obj_n_mc : `int`
+        obj_n_mc: `int`
             Number of monte carlo samples used for approximation of objective gradients
-        tf_n_mc : `int`
+        tf_n_mc: `int`
             Number of monte carlo samples used for approximation of test function gradients
-        obj_optimizer : function (grads, params) -> updates
+        obj_optimizer: function (grads, params) -> updates
             Optimizer that is used for objective params
-        test_optimizer : function (grads, params) -> updates
+        test_optimizer: function (grads, params) -> updates
             Optimizer that is used for test function params
-        more_obj_params : `list`
+        more_obj_params: `list`
             Add custom params for objective optimizer
-        more_tf_params : `list`
+        more_tf_params: `list`
             Add custom params for test function optimizer
-        more_updates : `dict`
+        more_updates: `dict`
             Add custom updates to resulting updates
-        total_grad_norm_constraint : `float`
+        total_grad_norm_constraint: `float`
             Bounds gradient norm, prevents exploding gradient problem
-        score : `bool`
+        score: `bool`
             calculate loss on each step? Defaults to False for speed
-        fn_kwargs : `dict`
+        fn_kwargs: `dict`
             Add kwargs to theano.function (e.g. `{'profile': True}`)
-        more_replacements : `dict`
+        more_replacements: `dict`
             Apply custom replacements before calculating gradients
 
         Returns
@@ -308,7 +342,7 @@ class ObjectiveFunction(object):
 
         Parameters
         ----------
-        sc_n_mc : `int`
+        sc_n_mc: `int`
             number of scoring MC samples
         more_replacements:
             Apply custom replacements before compiling a function
@@ -339,19 +373,18 @@ class ObjectiveFunction(object):
         return m * self.op.T(a)
 
 
-class Operator(object):
+class Operator:
     R"""**Base class for Operator**
 
     Parameters
     ----------
-    approx : :class:`Approximation`
+    approx: :class:`Approximation`
         an approximation instance
 
     Notes
     -----
     For implementing custom operator it is needed to define :func:`Operator.apply` method
     """
-    __hash__ = id
 
     has_test_function = False
     returns_loss = True
@@ -371,8 +404,12 @@ class Operator(object):
 
     inputs = property(lambda self: self.approx.inputs)
     logp = property(lambda self: self.approx.logp)
+    varlogp = property(lambda self: self.approx.varlogp)
+    datalogp = property(lambda self: self.approx.datalogp)
     logq = property(lambda self: self.approx.logq)
     logp_norm = property(lambda self: self.approx.logp_norm)
+    varlogp_norm = property(lambda self: self.approx.varlogp_norm)
+    datalogp_norm = property(lambda self: self.approx.datalogp_norm)
     logq_norm = property(lambda self: self.approx.logq_norm)
     model = property(lambda self: self.approx.model)
 
@@ -385,7 +422,7 @@ class Operator(object):
 
         Parameters
         ----------
-        f : :class:`TestFunction` or None
+        f: :class:`TestFunction` or None
             function that takes `z = self.input` and returns
             same dimensional output
 
@@ -425,7 +462,7 @@ def collect_shared_to_list(params):
 
     Parameters
     ----------
-    params : {dict|None}
+    params: {dict|None}
 
     Returns
     -------
@@ -443,9 +480,7 @@ def collect_shared_to_list(params):
             'Unknown type %s for %r, need dict or None')
 
 
-class TestFunction(object):
-    __hash__ = id
-
+class TestFunction:
     def __init__(self):
         self._inited = False
         self.shared_params = None
@@ -469,7 +504,7 @@ class TestFunction(object):
         return obj
 
 
-class Group(object):
+class Group(WithMemoization):
     R"""**Base class for grouping variables in VI**
 
     Grouped Approximation is used for modelling mutual dependencies
@@ -477,27 +512,27 @@ class Group(object):
 
     Parameters
     ----------
-    group : list
+    group: list
         List of PyMC3 variables or None indicating that group takes all the rest variables
-    vfam : str
+    vfam: str
         String that marks the corresponding variational family for the group.
         Cannot be passed both with `params`
-    params : dict
+    params: dict
         Dict with variational family parameters, full description can be found below.
         Cannot be passed both with `vfam`
-    random_seed : int
+    random_seed: int
         Random seed for underlying random generator
     model :
         PyMC3 Model
-    local : bool
+    local: bool
         Indicates whether this group is local. Cannot be passed without `params`.
         Such group should have only one variable
-    rowwise : bool
+    rowwise: bool
         Indicates whether this group is independently parametrized over first dim.
         Such group should have only one variable
-    options : dict
+    options: dict
         Special options for the group
-    kwargs : Other kwargs for the group
+    kwargs: Other kwargs for the group
 
     Notes
     -----
@@ -682,8 +717,7 @@ class Group(object):
     -   Kingma, D. P., & Welling, M. (2014).
         `Auto-Encoding Variational Bayes. stat, 1050, 1. <https://arxiv.org/abs/1312.6114>`_
     """
-    __hash__ = id
-    # need to be defined in init
+    # needs to be defined in init
     shared_params = None
     symbolic_initial = None
     replacements = None
@@ -740,13 +774,13 @@ class Group(object):
             if vfam is not None and params is not None:
                 raise TypeError('Cannot call Group with both `vfam` and `params` provided')
             elif vfam is not None:
-                return object.__new__(cls.group_for_short_name(vfam))
+                return super().__new__(cls.group_for_short_name(vfam))
             elif params is not None:
-                return object.__new__(cls.group_for_params(params))
+                return super().__new__(cls.group_for_params(params))
             else:
                 raise TypeError('Need to call Group with either `vfam` or `params` provided')
         else:
-            return object.__new__(cls)
+            return super().__new__(cls)
 
     def __init__(self, group,
                  vfam=None,
@@ -794,7 +828,7 @@ class Group(object):
 
         Parameters
         ----------
-        kwargs : special kwargs needed sometimes
+        kwargs: special kwargs needed sometimes
 
         Returns
         -------
@@ -828,7 +862,7 @@ class Group(object):
 
         Parameters
         ----------
-        name : str
+        name: str
             name for tensor
         Returns
         -------
@@ -844,7 +878,7 @@ class Group(object):
 
         Parameters
         ----------
-        name : str
+        name: str
             name for tensor
         Returns
         -------
@@ -879,6 +913,9 @@ class Group(object):
         self.replacements = dict()
         self.group = [get_transformed(var) for var in self.group]
         for var in self.group:
+            if isinstance(var.distribution, pm.Discrete):
+                raise ParametrizationError('Discrete variables are not supported by VI: {}'
+                                           .format(var))
             begin = self.ddim
             if self.batched:
                 if var.ndim < 1:
@@ -932,11 +969,11 @@ class Group(object):
 
         Parameters
         ----------
-        size : scalar
+        size: scalar
             sample size
-        dim : scalar
+        dim: scalar
             latent fixed dim
-        more_replacements : dict
+        more_replacements: dict
             replacements for latent batch shape
 
         Returns
@@ -973,11 +1010,11 @@ class Group(object):
 
         Parameters
         ----------
-        size : scalar
+        size: scalar
             sample size
-        deterministic : bool or scalar
+        deterministic: bool or scalar
             whether to sample in deterministic manner
-        more_replacements : dict
+        more_replacements: dict
             more replacements passed to shape
 
         Notes
@@ -1050,13 +1087,13 @@ class Group(object):
 
         Parameters
         ----------
-        node : :class:`Variable`
+        node: :class:`Variable`
             Theano node with symbolically applied VI replacements
-        s : scalar
+        s: scalar
             desired number of samples
-        d : bool or int
+        d: bool or int
             whether sampling is done deterministically
-        more_replacements : dict
+        more_replacements: dict
             more replacements to apply
 
         Returns
@@ -1064,14 +1101,14 @@ class Group(object):
         :class:`Variable` with applied replacements, ready to use
         """
         flat2rand = self.make_size_and_deterministic_replacements(s, d, more_replacements)
-        node_out = theano.clone(node, flat2rand, strict=False)
+        node_out = theano.clone(node, flat2rand)
         try_to_set_test_value(node, node_out, s)
         return node_out
 
     def to_flat_input(self, node):
         """*Dev* - replace vars with flattened view stored in `self.inputs`
         """
-        return theano.clone(node, self.replacements, strict=False)
+        return theano.clone(node, self.replacements)
 
     def symbolic_sample_over_posterior(self, node):
         """*Dev* - performs sampling of node applying independent samples from posterior each time.
@@ -1106,11 +1143,11 @@ class Group(object):
 
         Parameters
         ----------
-        s : scalar
+        s: scalar
             sample size
-        d : bool or scalar
+        d: bool or scalar
             whether sampling is done deterministically
-        more_replacements : dict
+        more_replacements: dict
             replacements for shape and initial
 
         Returns
@@ -1184,11 +1221,12 @@ class Group(object):
     def mean(self):
         raise NotImplementedError
 
+
 group_for_params = Group.group_for_params
 group_for_short_name = Group.group_for_short_name
 
 
-class Approximation(object):
+class Approximation(WithMemoization):
     """**Wrapper for grouped approximations**
 
     Wraps list of groups, creates an Approximation instance that collects
@@ -1197,9 +1235,9 @@ class Approximation(object):
 
     Parameters
     ----------
-    groups : list[Group]
+    groups: list[Group]
         List of :class:`Group` instances. They should have all model variables
-    model : Model
+    model: Model
 
     Notes
     -----
@@ -1217,7 +1255,6 @@ class Approximation(object):
     --------
     :class:`Group`
     """
-    __hash__ = id
 
     def __init__(self, groups, model=None):
         self._scale_cost_to_minibatch = theano.shared(np.int8(1))
@@ -1280,7 +1317,10 @@ class Approximation(object):
         """*Dev* - normalizing constant for `self.logq`, scales it to `minibatch_size` instead of `total_size`.
         Here the effect is controlled by `self.scale_cost_to_minibatch`
         """
-        t = tt.max(self.collect('symbolic_normalizing_constant'))
+        t = tt.max(
+            self.collect('symbolic_normalizing_constant') + [
+                var.scaling for var in self.model.observed_RVs
+            ])
         t = tt.switch(self._scale_cost_to_minibatch, t,
                       tt.constant(1, dtype=t.dtype))
         return pm.floatX(t)
@@ -1301,26 +1341,81 @@ class Approximation(object):
         return self.logq / self.symbolic_normalizing_constant
 
     @node_property
+    def _sized_symbolic_varlogp_and_datalogp(self):
+        """*Dev* - computes sampled prior term from model via `theano.scan`"""
+        varlogp_s, datalogp_s = self.symbolic_sample_over_posterior(
+            [self.model.varlogpt, self.model.datalogpt])
+        return varlogp_s, datalogp_s  # both shape (s,)
+
+    @node_property
+    def sized_symbolic_varlogp(self):
+        """*Dev* - computes sampled prior term from model via `theano.scan`"""
+        return self._sized_symbolic_varlogp_and_datalogp[0]  # shape (s,)
+
+    @node_property
+    def sized_symbolic_datalogp(self):
+        """*Dev* - computes sampled data term from model via `theano.scan`"""
+        return self._sized_symbolic_varlogp_and_datalogp[1]  # shape (s,)
+
+    @node_property
     def sized_symbolic_logp(self):
-        """*Dev* - computes sampled `logP` from model via `theano.scan`"""
-        free_logp_local = self.symbolic_sample_over_posterior(self.model.logpt)
-        return free_logp_local  # shape (s,)
+        """*Dev* - computes sampled logP from model via `theano.scan`"""
+        return self.sized_symbolic_varlogp + self.sized_symbolic_datalogp  # shape (s,)
 
     @node_property
     def logp(self):
         """*Dev* - computes :math:`E_{q}(logP)` from model via `theano.scan` that can be optimized later"""
-        return self.sized_symbolic_logp.mean(0)
+        return self.varlogp + self.datalogp
+
+    @node_property
+    def varlogp(self):
+        """*Dev* - computes :math:`E_{q}(prior term)` from model via `theano.scan` that can be optimized later"""
+        return self.sized_symbolic_varlogp.mean(0)
+
+    @node_property
+    def datalogp(self):
+        """*Dev* - computes :math:`E_{q}(data term)` from model via `theano.scan` that can be optimized later"""
+        return self.sized_symbolic_datalogp.mean(0)
+
+    @node_property
+    def _single_symbolic_varlogp_and_datalogp(self):
+        """*Dev* - computes sampled prior term from model via `theano.scan`"""
+        varlogp, datalogp = self.symbolic_single_sample(
+            [self.model.varlogpt, self.model.datalogpt])
+        return varlogp, datalogp
+
+    @node_property
+    def single_symbolic_varlogp(self):
+        """*Dev* - for single MC sample estimate of :math:`E_{q}(prior term)` `theano.scan`
+        is not needed and code can be optimized"""
+        return self._single_symbolic_varlogp_and_datalogp[0]
+
+    @node_property
+    def single_symbolic_datalogp(self):
+        """*Dev* - for single MC sample estimate of :math:`E_{q}(data term)` `theano.scan`
+        is not needed and code can be optimized"""
+        return self._single_symbolic_varlogp_and_datalogp[1]
 
     @node_property
     def single_symbolic_logp(self):
         """*Dev* - for single MC sample estimate of :math:`E_{q}(logP)` `theano.scan`
         is not needed and code can be optimized"""
-        return self.symbolic_single_sample(self.model.logpt)
+        return self.single_symbolic_datalogp + self.single_symbolic_varlogp
 
     @node_property
     def logp_norm(self):
         """*Dev* - normalized :math:`E_{q}(logP)`"""
         return self.logp / self.symbolic_normalizing_constant
+
+    @node_property
+    def varlogp_norm(self):
+        """*Dev* - normalized :math:`E_{q}(prior term)`"""
+        return self.varlogp / self.symbolic_normalizing_constant
+
+    @node_property
+    def datalogp_norm(self):
+        """*Dev* - normalized :math:`E_{q}(data term)`"""
+        return self.datalogp / self.symbolic_normalizing_constant
 
     @property
     def replacements(self):
@@ -1335,11 +1430,11 @@ class Approximation(object):
 
         Parameters
         ----------
-        s : scalar
+        s: scalar
             sample size
-        d : bool
+        d: bool
             whether sampling is done deterministically
-        more_replacements : dict
+        more_replacements: dict
             replacements for shape and initial
 
         Returns
@@ -1361,25 +1456,26 @@ class Approximation(object):
 
         Parameters
         ----------
-        node : :class:`Variable`
+        node: :class:`Variable`
             Theano node with symbolically applied VI replacements
-        s : scalar
+        s: scalar
             desired number of samples
-        d : bool or int
+        d: bool or int
             whether sampling is done deterministically
-        more_replacements : dict
+        more_replacements: dict
             more replacements to apply
 
         Returns
         -------
         :class:`Variable` with applied replacements, ready to use
         """
+        _node = node
         optimizations = self.get_optimization_replacements(s, d)
         flat2rand = self.make_size_and_deterministic_replacements(s, d, more_replacements)
         node = theano.clone(node, optimizations)
-        node_out = theano.clone(node, flat2rand, strict=False)
-        try_to_set_test_value(node, node_out, s)
-        return node_out
+        node = theano.clone(node, flat2rand)
+        try_to_set_test_value(_node, node, s)
+        return node
 
     def to_flat_input(self, node):
         """*Dev* - replace vars with flattened view stored in `self.inputs`
@@ -1418,7 +1514,8 @@ class Approximation(object):
         repl = collections.OrderedDict()
         # avoid scan if size is constant and equal to one
         if isinstance(s, int) and (s == 1) or s is None:
-            repl[self.logp] = self.single_symbolic_logp
+            repl[self.varlogp] = self.single_symbolic_varlogp
+            repl[self.datalogp] = self.single_symbolic_datalogp
         return repl
 
     @change_flags(compute_test_value='off')
@@ -1429,12 +1526,12 @@ class Approximation(object):
 
         Parameters
         ----------
-        node : Theano Variables (or Theano expressions)
-        size : None or scalar
+        node: Theano Variables (or Theano expressions)
+        size: None or scalar
             number of samples
-        more_replacements : `dict`
+        more_replacements: `dict`
             add custom replacements to graph, e.g. change input source
-        deterministic : bool
+        deterministic: bool
             whether to use zeros as initial distribution
             if True - zero initial point will produce constant latent variables
 
@@ -1443,6 +1540,7 @@ class Approximation(object):
         sampled node(s) with replacements
         """
         node_in = node
+        node = theano.clone(node, more_replacements)
         if size is None:
             node_out = self.symbolic_single_sample(node)
         else:
@@ -1471,7 +1569,7 @@ class Approximation(object):
         return found
 
     @property
-    @memoize
+    @memoize(bound=True)
     @change_flags(compute_test_value='off')
     def sample_dict_fn(self):
         s = tt.iscalar()
@@ -1486,27 +1584,35 @@ class Approximation(object):
 
         return inner
 
-    def sample(self, draws=500, include_transformed=True):
+    def sample(self, draws=500, include_transformed=True, backend='ndarray', 
+               name=None):
         """Draw samples from variational posterior.
 
         Parameters
         ----------
-        draws : `int`
+        draws: `int`
             Number of random samples.
-        include_transformed : `bool`
+        include_transformed: `bool`
             If True, transformed variables are also sampled. Default is False.
+        backend: `str`
+            Trace backend type to use. Valid entries include: 'ndarray' (default),
+            'text', 'sqlite', 'hdf5'.
+        name: `str`
+            Name for backend (required for non-NDArray backends). Default is None.
 
         Returns
         -------
-        trace : :class:`pymc3.backends.base.MultiTrace`
+        trace: :class:`pymc3.backends.base.MultiTrace`
             Samples drawn from variational posterior.
         """
         vars_sampled = get_default_varnames(self.model.unobserved_RVs,
                                             include_transformed=include_transformed)
         samples = self.sample_dict_fn(draws)  # type: dict
         points = ({name: records[i] for name, records in samples.items()} for i in range(draws))
-        trace = pm.sampling.NDArray(model=self.model, vars=vars_sampled, test_point={
-            name: records[0] for name, records in samples.items()
+        _backends = dict(ndarray=NDArray, text=Text, hdf5=HDF5, sqlite=SQLite)
+
+        trace = _backends[backend](name=name, model=self.model, vars=vars_sampled, test_point={
+                name: records[0] for name, records in samples.items()
         })
         try:
             trace.setup(draws=draws, chain=0)

@@ -1,11 +1,30 @@
+#   Copyright 2020 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
 from . import timeseries
 from . import transforms
+from . import shape_utils
+
+from .posterior_predictive import fast_sample_posterior_predictive
 
 from .continuous import Uniform
 from .continuous import Flat
 from .continuous import HalfFlat
+from .continuous import TruncatedNormal
 from .continuous import Normal
 from .continuous import Beta
+from .continuous import Kumaraswamy
 from .continuous import Exponential
 from .continuous import Laplace
 from .continuous import StudentT
@@ -26,7 +45,10 @@ from .continuous import SkewNormal
 from .continuous import Triangular
 from .continuous import Gumbel
 from .continuous import Logistic
+from .continuous import LogitNormal
 from .continuous import Interpolated
+from .continuous import Rice
+from .continuous import Moyal
 
 from .discrete import Binomial
 from .discrete import BetaBinomial
@@ -42,6 +64,7 @@ from .discrete import ZeroInflatedBinomial
 from .discrete import DiscreteUniform
 from .discrete import Geometric
 from .discrete import Categorical
+from .discrete import OrderedLogistic
 
 from .distribution import DensityDist
 from .distribution import Distribution
@@ -52,11 +75,14 @@ from .distribution import TensorType
 from .distribution import draw_values
 from .distribution import generate_samples
 
+from .simulator import Simulator
+
 from .mixture import Mixture
 from .mixture import NormalMixture
 
 from .multivariate import MvNormal
 from .multivariate import MatrixNormal
+from .multivariate import KroneckerNormal
 from .multivariate import MvStudentT
 from .multivariate import Dirichlet
 from .multivariate import Multinomial
@@ -72,19 +98,15 @@ from .timeseries import GARCH11
 from .timeseries import MvGaussianRandomWalk
 from .timeseries import MvStudentTRandomWalk
 
-from .transforms import transform
-from .transforms import stick_breaking
-from .transforms import logodds
-from .transforms import log
-from .transforms import sum_to_1
-
 from .bound import Bound
 
 __all__ = ['Uniform',
            'Flat',
            'HalfFlat',
+           'TruncatedNormal',
            'Normal',
            'Beta',
+           'Kumaraswamy',
            'Exponential',
            'Laplace',
            'StudentT',
@@ -115,6 +137,7 @@ __all__ = ['Uniform',
            'DiscreteUniform',
            'Geometric',
            'Categorical',
+           'OrderedLogistic',
            'DensityDist',
            'Distribution',
            'Continuous',
@@ -123,6 +146,7 @@ __all__ = ['Uniform',
            'TensorType',
            'MvNormal',
            'MatrixNormal',
+           'KroneckerNormal',
            'MvStudentT',
            'Dirichlet',
            'Multinomial',
@@ -143,6 +167,11 @@ __all__ = ['Uniform',
            'DiscreteWeibull',
            'Gumbel',
            'Logistic',
+           'LogitNormal',
            'Interpolated',
            'Bound',
+           'Rice',
+           'Moyal',
+           'Simulator',
+           'fast_sample_posterior_predictive'
            ]

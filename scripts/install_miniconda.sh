@@ -35,7 +35,7 @@ if [ ! -d $INSTALL_FOLDER ] || [ ! -e $INSTALL_FOLDER/bin/conda ]; then
 
   echo "Installing miniconda for python-$PYTHON_VERSION to $INSTALL_FOLDER"
   # install miniconda to home folder
-  bash ${DOWNLOAD_PATH} -b -p $INSTALL_FOLDER
+  bash ${DOWNLOAD_PATH} -b -f -p $INSTALL_FOLDER
 
   # tidy up
   rm ${DOWNLOAD_PATH}
@@ -46,3 +46,5 @@ fi
 export PATH="$INSTALL_FOLDER/bin:$PATH"
 echo "Adding $INSTALL_FOLDER to PATH.  Consider adding it in your .rc file as well."
 conda update -q -y conda
+# Uninstalling miniconda's numpy to avoid conflicting versions when creating the test env
+pip uninstall -y numpy

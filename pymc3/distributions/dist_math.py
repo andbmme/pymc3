@@ -1,20 +1,50 @@
+#   Copyright 2020 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
 '''
 Created on Mar 7, 2011
 
 @author: johnsalvatier
 '''
-from __future__ import division
-
+import platform
 import numpy as np
 import scipy.linalg
+import scipy.stats
 import theano.tensor as tt
 import theano
+from theano.scalar import UnaryScalarOp, upgrade_to_float_no_complex
+from theano.tensor.slinalg import Cholesky
+from theano.scan_module import until
+from theano import scan
+from .shape_utils import to_tuple
 
 from .special import gammaln
 from pymc3.theanof import floatX
 
+
 f = floatX
 c = - .5 * np.log(2. * np.pi)
+_beta_clip_values = {
+    dtype: (np.nextafter(0, 1, dtype=dtype), np.nextafter(1, 0, dtype=dtype))
+    for dtype in ["float16", "float32", "float64"]
+}
+if platform.system() in ["Linux", "Darwin"]:
+    _beta_clip_values["float128"] = (
+        np.nextafter(0, 1, dtype="float128"),
+        np.nextafter(1, 0, dtype="float128")
+    )
+
 
 
 def bound(logp, *conditions, **kwargs):
@@ -23,9 +53,9 @@ def bound(logp, *conditions, **kwargs):
 
     Parameters
     ----------
-    logp : float
-    *conditions : booleans
-    broadcast_conditions : bool (optional, default=True)
+    logp: float
+    *conditions: booleans
+    broadcast_conditions: bool (optional, default=True)
         If True, broadcasts logp to match the largest shape of the conditions.
         This is used e.g. in DiscreteUniform where logp is a scalar constant and the shape
         is specified via the conditions.
@@ -62,7 +92,7 @@ def logpow(x, m):
     Calculates log(x**m) since m*log(x) will fail when m, x = 0.
     """
     # return m * log(x)
-    return tt.switch(tt.eq(x, 0), -np.inf, m * tt.log(x))
+    return tt.switch(tt.eq(x, 0), tt.switch(tt.eq(m, 0), 0.0, -np.inf), m * tt.log(x))
 
 
 def factln(n):
@@ -84,39 +114,40 @@ def std_cdf(x):
     return .5 + .5 * tt.erf(x / tt.sqrt(2.))
 
 
-def i0(x):
-    """
-    Calculates the 0 order modified Bessel function of the first kind""
-    """
-    return tt.switch(tt.lt(x, 5), 1. + x**2 / 4. + x**4 / 64. + x**6 / 2304. + x**8 / 147456.
-                     + x**10 / 14745600. + x**12 / 2123366400.,
-                     np.e**x / (2. * np.pi * x)**0.5 * (1. + 1. / (8. * x) + 9. / (128. * x**2) + 225. / (3072 * x**3)
-                                                        + 11025. / (98304. * x**4)))
+def normal_lcdf(mu, sigma, x):
+    """Compute the log of the cumulative density function of the normal."""
+    z = (x - mu) / sigma
+    return tt.switch(
+        tt.lt(z, -1.0),
+        tt.log(tt.erfcx(-z / tt.sqrt(2.)) / 2.) - tt.sqr(z) / 2.,
+        tt.log1p(-tt.erfc(z / tt.sqrt(2.)) / 2.)
+    )
 
 
-def i1(x):
-    """
-    Calculates the 1 order modified Bessel function of the first kind""
-    """
-    return tt.switch(tt.lt(x, 5), x / 2. + x**3 / 16. + x**5 / 384. + x**7 / 18432. +
-                     x**9 / 1474560. + x**11 / 176947200. + x**13 / 29727129600.,
-                     np.e**x / (2. * np.pi * x)**0.5 * (1. - 3. / (8. * x) + 15. / (128. * x**2) + 315. / (3072. * x**3)
-                                                        + 14175. / (98304. * x**4)))
+def normal_lccdf(mu, sigma, x):
+    z = (x - mu) / sigma
+    return tt.switch(
+        tt.gt(z, 1.0),
+        tt.log(tt.erfcx(z / tt.sqrt(2.)) / 2.) - tt.sqr(z) / 2.,
+        tt.log1p(-tt.erfc(-z / tt.sqrt(2.)) / 2.)
+    )
 
 
-def sd2rho(sd):
+def sigma2rho(sigma):
     """
-    `sd -> rho` theano converter
-    :math:`mu + sd*e = mu + log(1+exp(rho))*e`"""
-    return tt.log(tt.exp(tt.abs_(sd)) - 1.)
+    `sigma -> rho` theano converter
+    :math:`mu + sigma*e = mu + log(1+exp(rho))*e`"""
+    return tt.log(tt.exp(tt.abs_(sigma)) - 1.)
 
 
-def rho2sd(rho):
+def rho2sigma(rho):
     """
-    `rho -> sd` theano converter
-    :math:`mu + sd*e = mu + log(1+exp(rho))*e`"""
+    `rho -> sigma` theano converter
+    :math:`mu + sigma*e = mu + log(1+exp(rho))*e`"""
     return tt.nnet.softplus(rho)
 
+rho2sd = rho2sigma
+sd2rho = sigma2rho
 
 def log_normal(x, mean, **kwargs):
     """
@@ -125,11 +156,11 @@ def log_normal(x, mean, **kwargs):
 
     Parameters
     ----------
-    x : Tensor
+    x: Tensor
         point of evaluation
-    mean : Tensor
+    mean: Tensor
         mean of normal distribution
-    kwargs : one of parameters `{sd, tau, w, rho}`
+    kwargs: one of parameters `{sigma, tau, w, rho}`
 
     Notes
     -----
@@ -141,22 +172,22 @@ def log_normal(x, mean, **kwargs):
         4) `tau` that follows this equation :math:`tau = std^{-1}`
     ----
     """
-    sd = kwargs.get('sd')
+    sigma = kwargs.get('sigma')
     w = kwargs.get('w')
     rho = kwargs.get('rho')
     tau = kwargs.get('tau')
     eps = kwargs.get('eps', 0.)
-    check = sum(map(lambda a: a is not None, [sd, w, rho, tau]))
+    check = sum(map(lambda a: a is not None, [sigma, w, rho, tau]))
     if check > 1:
         raise ValueError('more than one required kwarg is passed')
     if check == 0:
         raise ValueError('none of required kwarg is passed')
-    if sd is not None:
-        std = sd
+    if sigma is not None:
+        std = sigma
     elif w is not None:
         std = tt.exp(w)
     elif rho is not None:
-        std = rho2sd(rho)
+        std = rho2sigma(rho)
     else:
         std = tau**(-1)
     std += f(eps)
@@ -170,9 +201,9 @@ def MvNormalLogp():
 
     Parameters
     ----------
-    cov : tt.matrix
+    cov: tt.matrix
         The covariance matrix.
-    delta : tt.matrix
+    delta: tt.matrix
         Array of deviations from the mean.
     """
     cov = tt.matrix('cov')
@@ -182,7 +213,7 @@ def MvNormalLogp():
 
     solve_lower = tt.slinalg.Solve(A_structure='lower_triangular')
     solve_upper = tt.slinalg.Solve(A_structure='upper_triangular')
-    cholesky = Cholesky(nofail=True, lower=True)
+    cholesky = Cholesky(lower=True, on_error='nan')
 
     n, k = delta.shape
     n, k = f(n), f(k)
@@ -229,88 +260,6 @@ def MvNormalLogp():
         [cov, delta], [logp], grad_overrides=dlogp, inline=True)
 
 
-class Cholesky(theano.Op):
-    """
-    Return a triangular matrix square root of positive semi-definite `x`.
-
-    This is a copy of the cholesky op in theano, that doesn't throw an
-    error if the matrix is not positive definite, but instead returns
-    nan.
-
-    This has been merged upstream and we should switch to that
-    version after the next theano release.
-
-    L = cholesky(X, lower=True) implies dot(L, L.T) == X.
-    """
-    __props__ = ('lower', 'destructive', 'nofail')
-
-    def __init__(self, lower=True, nofail=False):
-        self.lower = lower
-        self.destructive = False
-        self.nofail = nofail
-
-    def make_node(self, x):
-        x = tt.as_tensor_variable(x)
-        if x.ndim != 2:
-            raise ValueError('Matrix must me two dimensional.')
-        return tt.Apply(self, [x], [x.type()])
-
-    def perform(self, node, inputs, outputs):
-        x = inputs[0]
-        z = outputs[0]
-        try:
-            z[0] = scipy.linalg.cholesky(x, lower=self.lower).astype(x.dtype)
-        except (ValueError, scipy.linalg.LinAlgError):
-            if self.nofail:
-                z[0] = np.eye(x.shape[-1])
-                z[0][0, 0] = np.nan
-            else:
-                raise
-
-    def grad(self, inputs, gradients):
-        """
-        Cholesky decomposition reverse-mode gradient update.
-
-        Symbolic expression for reverse-mode Cholesky gradient taken from [0]_
-
-        References
-        ----------
-        .. [0] I. Murray, "Differentiation of the Cholesky decomposition",
-           http://arxiv.org/abs/1602.07527
-
-        """
-
-        x = inputs[0]
-        dz = gradients[0]
-        chol_x = self(x)
-        ok = tt.all(tt.nlinalg.diag(chol_x) > 0)
-        chol_x = tt.switch(ok, chol_x, tt.fill_diagonal(chol_x, 1))
-        dz = tt.switch(ok, dz, floatX(1))
-
-        # deal with upper triangular by converting to lower triangular
-        if not self.lower:
-            chol_x = chol_x.T
-            dz = dz.T
-
-        def tril_and_halve_diagonal(mtx):
-            """Extracts lower triangle of square matrix and halves diagonal."""
-            return tt.tril(mtx) - tt.diag(tt.diagonal(mtx) / 2.)
-
-        def conjugate_solve_triangular(outer, inner):
-            """Computes L^{-T} P L^{-1} for lower-triangular L."""
-            solve = tt.slinalg.Solve(A_structure="upper_triangular")
-            return solve(outer.T, solve(outer.T, inner.T).T)
-
-        s = conjugate_solve_triangular(
-            chol_x, tril_and_halve_diagonal(chol_x.T.dot(dz)))
-
-        if self.lower:
-            grad = tt.tril(s + s.T) - tt.diag(tt.diagonal(s))
-        else:
-            grad = tt.triu(s + s.T) - tt.diag(tt.diagonal(s))
-        return [tt.switch(ok, grad, floatX(np.nan))]
-
-
 class SplineWrapper(theano.Op):
     """
     Creates a theano operation from scipy.interpolate.UnivariateSpline
@@ -346,3 +295,308 @@ class SplineWrapper(theano.Op):
         x_grad, = grads
 
         return [x_grad * self.grad_op(x)]
+
+
+class I1e(UnaryScalarOp):
+    """
+    Modified Bessel function of the first kind of order 1, exponentially scaled.
+    """
+    nfunc_spec = ('scipy.special.i1e', 1, 1)
+
+    def impl(self, x):
+        return scipy.special.i1e(x)
+
+
+i1e_scalar = I1e(upgrade_to_float_no_complex, name="i1e")
+i1e = tt.Elemwise(i1e_scalar, name="Elemwise{i1e,no_inplace}")
+
+
+class I0e(UnaryScalarOp):
+    """
+    Modified Bessel function of the first kind of order 0, exponentially scaled.
+    """
+    nfunc_spec = ('scipy.special.i0e', 1, 1)
+
+    def impl(self, x):
+        return scipy.special.i0e(x)
+
+    def grad(self, inp, grads):
+        x, = inp
+        gz, = grads
+        return gz * (i1e_scalar(x) - theano.scalar.sgn(x) * i0e_scalar(x)),
+
+
+i0e_scalar = I0e(upgrade_to_float_no_complex, name="i0e")
+i0e = tt.Elemwise(i0e_scalar, name="Elemwise{i0e,no_inplace}")
+
+
+def random_choice(*args, **kwargs):
+    """Return draws from a categorial probability functions
+
+    Args:
+        p: array
+           Probability of each class. If p.ndim > 1, the last axis is
+           interpreted as the probability of each class, and numpy.random.choice
+           is iterated for every other axis element.
+        size: int or tuple
+            Shape of the desired output array. If p is multidimensional, size
+            should broadcast with p.shape[:-1].
+
+    Returns:
+        random sample: array
+
+    """
+    p = kwargs.pop('p')
+    size = kwargs.pop('size')
+    k = p.shape[-1]
+
+    if p.ndim > 1:
+        # If p is an nd-array, the last axis is interpreted as the class
+        # probability. We must iterate over the elements of all the other
+        # dimensions.
+        # We first ensure that p is broadcasted to the output's shape
+        size = to_tuple(size) + (1,)
+        p = np.broadcast_arrays(p, np.empty(size))[0]
+        out_shape = p.shape[:-1]
+        # np.random.choice accepts 1D p arrays, so we semiflatten p to
+        # iterate calls using the last axis as the category probabilities
+        p = np.reshape(p, (-1, p.shape[-1]))
+        samples = np.array([np.random.choice(k, p=p_) for p_ in p])
+        # We reshape to the desired output shape
+        samples = np.reshape(samples, out_shape)
+    else:
+        samples = np.random.choice(k, p=p, size=size)
+    return samples
+
+
+def zvalue(value, sigma, mu):
+    """
+    Calculate the z-value for a normal distribution.
+    """
+    return (value - mu) / sigma
+
+
+def incomplete_beta_cfe(a, b, x, small):
+    '''Incomplete beta continued fraction expansions
+    based on Cephes library by Steve Moshier (incbet.c).
+    small: Choose element-wise which continued fraction expansion to use.
+    '''
+    BIG = tt.constant(4.503599627370496e15, dtype='float64')
+    BIGINV = tt.constant(2.22044604925031308085e-16, dtype='float64')
+    THRESH = tt.constant(3. * np.MachAr().eps, dtype='float64')
+
+    zero = tt.constant(0., dtype='float64')
+    one = tt.constant(1., dtype='float64')
+    two = tt.constant(2., dtype='float64')
+
+    r = one
+    k1 = a
+    k3 = a
+    k4 = a + one
+    k5 = one
+    k8 = a + two
+
+    k2 = tt.switch(small, a + b, b - one)
+    k6 = tt.switch(small, b - one, a + b)
+    k7 = tt.switch(small, k4, a + one)
+    k26update = tt.switch(small, one, -one)
+    x = tt.switch(small, x, x / (one - x))
+
+    pkm2 = zero
+    qkm2 = one
+    pkm1 = one
+    qkm1 = one
+    r = one
+
+    def _step(
+            i,
+            pkm1, pkm2, qkm1, qkm2,
+            k1, k2, k3, k4, k5, k6, k7, k8, r
+    ):
+        xk = -(x * k1 * k2) / (k3 * k4)
+        pk = pkm1 + pkm2 * xk
+        qk = qkm1 + qkm2 * xk
+        pkm2 = pkm1
+        pkm1 = pk
+        qkm2 = qkm1
+        qkm1 = qk
+
+        xk = (x * k5 * k6) / (k7 * k8)
+        pk = pkm1 + pkm2 * xk
+        qk = qkm1 + qkm2 * xk
+        pkm2 = pkm1
+        pkm1 = pk
+        qkm2 = qkm1
+        qkm1 = qk
+
+        old_r = r
+        r = tt.switch(tt.eq(qk, zero), r, pk/qk)
+
+        k1 += one
+        k2 += k26update
+        k3 += two
+        k4 += two
+        k5 += one
+        k6 -= k26update
+        k7 += two
+        k8 += two
+
+        big_cond = tt.gt(tt.abs_(qk) + tt.abs_(pk), BIG)
+        biginv_cond = tt.or_(
+            tt.lt(tt.abs_(qk), BIGINV),
+            tt.lt(tt.abs_(pk), BIGINV)
+        )
+
+        pkm2 = tt.switch(big_cond, pkm2 * BIGINV, pkm2)
+        pkm1 = tt.switch(big_cond, pkm1 * BIGINV, pkm1)
+        qkm2 = tt.switch(big_cond, qkm2 * BIGINV, qkm2)
+        qkm1 = tt.switch(big_cond, qkm1 * BIGINV, qkm1)
+
+        pkm2 = tt.switch(biginv_cond, pkm2 * BIG, pkm2)
+        pkm1 = tt.switch(biginv_cond, pkm1 * BIG, pkm1)
+        qkm2 = tt.switch(biginv_cond, qkm2 * BIG, qkm2)
+        qkm1 = tt.switch(biginv_cond, qkm1 * BIG, qkm1)
+
+        return ((pkm1, pkm2, qkm1, qkm2,
+                 k1, k2, k3, k4, k5, k6, k7, k8, r),
+                until(tt.abs_(old_r - r) < (THRESH * tt.abs_(r))))
+
+    (pkm1, pkm2, qkm1, qkm2,
+     k1, k2, k3, k4, k5, k6, k7, k8, r), _ = scan(
+        _step,
+        sequences=[tt.arange(0, 300)],
+        outputs_info=[
+            e for e in
+            tt.cast((pkm1, pkm2, qkm1, qkm2,
+                     k1, k2, k3, k4, k5, k6, k7, k8, r),
+                    'float64')
+        ]
+    )
+
+    return r[-1]
+
+
+def incomplete_beta_ps(a, b, value):
+    '''Power series for incomplete beta
+    Use when b*x is small and value not too close to 1.
+    Based on Cephes library by Steve Moshier (incbet.c)
+    '''
+    one = tt.constant(1, dtype='float64')
+    ai = one / a
+    u = (one - b) * value
+    t1 = u / (a + one)
+    t = u
+    threshold = np.MachAr().eps * ai
+    s = tt.constant(0, dtype='float64')
+
+    def _step(i, t, s):
+        t *= (i - b) * value / i
+        step = t / (a + i)
+        s += step
+        return ((t, s), until(tt.abs_(step) < threshold))
+
+    (t, s), _ = scan(
+        _step,
+        sequences=[tt.arange(2, 302)],
+        outputs_info=[
+            e for e in
+            tt.cast((t, s),
+                    'float64')
+        ]
+    )
+
+    s = s[-1] + t1 + ai
+
+    t = (
+        gammaln(a + b) - gammaln(a) - gammaln(b) +
+        a * tt.log(value) +
+        tt.log(s)
+    )
+    return tt.exp(t)
+
+
+def incomplete_beta(a, b, value):
+    '''Incomplete beta implementation
+    Power series and continued fraction expansions chosen for best numerical
+    convergence across the board based on inputs.
+    '''
+    machep = tt.constant(np.MachAr().eps, dtype='float64')
+    one = tt.constant(1, dtype='float64')
+    w = one - value
+
+    ps = incomplete_beta_ps(a, b, value)
+
+    flip = tt.gt(value, (a / (a + b)))
+    aa, bb = a, b
+    a = tt.switch(flip, bb, aa)
+    b = tt.switch(flip, aa, bb)
+    xc = tt.switch(flip, value, w)
+    x = tt.switch(flip, w, value)
+
+    tps = incomplete_beta_ps(a, b, x)
+    tps = tt.switch(tt.le(tps, machep), one - machep, one - tps)
+
+    # Choose which continued fraction expansion for best convergence.
+    small = tt.lt(x * (a + b - 2.0) - (a - one), 0.0)
+    cfe = incomplete_beta_cfe(a, b, x, small)
+    w = tt.switch(small, cfe, cfe / xc)
+
+    # Direct incomplete beta accounting for flipped a, b.
+    t = tt.exp(
+        a * tt.log(x) + b * tt.log(xc) +
+        gammaln(a + b) - gammaln(a) - gammaln(b) +
+        tt.log(w / a)
+    )
+
+    t = tt.switch(
+        flip,
+        tt.switch(tt.le(t, machep), one - machep, one - t),
+        t
+    )
+    return tt.switch(
+        tt.and_(flip, tt.and_(tt.le((b * x), one), tt.le(x, 0.95))),
+        tps,
+        tt.switch(
+            tt.and_(tt.le(b * value, one), tt.le(value, 0.95)),
+            ps,
+            t))
+
+
+def clipped_beta_rvs(a, b, size=None, dtype="float64"):
+    """Draw beta distributed random samples in the open :math:`(0, 1)` interval.
+
+    The samples are generated with ``scipy.stats.beta.rvs``, but any value that
+    is equal to 0 or 1 will be shifted towards the next floating point in the
+    interval :math:`[0, 1]`, depending on the floating point precision that is
+    given by ``dtype``.
+
+    Parameters
+    ----------
+    a : float or array_like of floats
+        Alpha, strictly positive (>0).
+    b : float or array_like of floats
+        Beta, strictly positive (>0).
+    size : int or tuple of ints, optional
+        Output shape.  If the given shape is, e.g., ``(m, n, k)``, then
+        ``m * n * k`` samples are drawn.  If size is ``None`` (default),
+        a single value is returned if ``a`` and ``b`` are both scalars.
+        Otherwise, ``np.broadcast(a, b).size`` samples are drawn.
+    dtype : str or dtype instance
+        The floating point precision that the samples should have. This also
+        determines the value that will be used to shift any samples returned
+        by the numpy random number generator that are zero or one.
+    
+    Returns
+    -------
+    out : ndarray or scalar
+        Drawn samples from the parameterized beta distribution. The scipy
+        implementation can yield values that are equal to zero or one. We
+        assume the support of the Beta distribution to be in the open interval
+        :math:`(0, 1)`, so we shift any sample that is equal to 0 to
+        ``np.nextafter(0, 1, dtype=dtype)`` and any sample that is equal to 1
+        is shifted to ``np.nextafter(1, 0, dtype=dtype)``.
+
+    """
+    out = scipy.stats.beta.rvs(a, b, size=size).astype(dtype)
+    lower, upper = _beta_clip_values[dtype]
+    return np.maximum(np.minimum(out, upper), lower)

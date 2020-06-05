@@ -1,4 +1,17 @@
-from __future__ import division
+#   Copyright 2020 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
 import sys
 import theano.tensor as tt
 # pylint: disable=unused-import
@@ -18,8 +31,92 @@ import scipy as sp
 import scipy.sparse
 from scipy.linalg import block_diag as scipy_block_diag
 from pymc3.theanof import floatX, largest_common_dtype, ix_
+from functools import reduce, partial
 
 # pylint: enable=unused-import
+
+
+def kronecker(*Ks):
+    r"""Return the Kronecker product of arguments:
+          :math:`K_1 \otimes K_2 \otimes ... \otimes K_D`
+
+    Parameters
+    ----------
+    Ks : Iterable of 2D array-like
+        Arrays of which to take the product.
+
+    Returns
+    -------
+    np.ndarray :
+        Block matrix Kroncker product of the argument matrices.
+    """
+    return reduce(tt.slinalg.kron, Ks)
+
+
+def cartesian(*arrays):
+    """Makes the Cartesian product of arrays.
+
+    Parameters
+    ----------
+    arrays: 1D array-like
+            1D arrays where earlier arrays loop more slowly than later ones
+    """
+    N = len(arrays)
+    return np.stack(np.meshgrid(*arrays, indexing='ij'), -1).reshape(-1, N)
+
+
+def kron_matrix_op(krons, m, op):
+    r"""Apply op to krons and m in a way that reproduces ``op(kronecker(*krons), m)``
+
+    Parameters
+    -----------
+    krons : list of square 2D array-like objects
+        D square matrices :math:`[A_1, A_2, ..., A_D]` to be Kronecker'ed
+        :math:`A = A_1 \otimes A_2 \otimes ... \otimes A_D`
+        Product of column dimensions must be :math:`N`
+    m : NxM array or 1D array (treated as Nx1)
+        Object that krons act upon
+
+    Returns
+    -------
+    numpy array
+    """
+    def flat_matrix_op(flat_mat, mat):
+        Nmat = mat.shape[1]
+        flat_shape = flat_mat.shape
+        mat2 = flat_mat.reshape((Nmat, -1))
+        return op(mat, mat2).T.reshape(flat_shape)
+
+    def kron_vector_op(v):
+        return reduce(flat_matrix_op, krons, v)
+
+    if m.ndim == 1:
+        m = m[:, None]  # Treat 1D array as Nx1 matrix
+    if m.ndim != 2:  # Has not been tested otherwise
+        raise ValueError('m must have ndim <= 2, not {}'.format(m.ndim))
+    res = kron_vector_op(m)
+    res_shape = res.shape
+    return tt.reshape(res, (res_shape[1], res_shape[0])).T
+
+
+# Define kronecker functions that work on 1D and 2D arrays
+kron_dot = partial(kron_matrix_op, op=tt.dot)
+kron_solve_lower = partial(kron_matrix_op, op=tt.slinalg.solve_lower_triangular)
+kron_solve_upper = partial(kron_matrix_op, op=tt.slinalg.solve_upper_triangular)
+
+def flat_outer(a, b):
+    return tt.outer(a, b).ravel()
+
+
+def kron_diag(*diags):
+    """Returns diagonal of a kronecker product.
+
+    Parameters
+    ----------
+    diags: 1D arrays
+           The diagonals of matrices that are to be Kroneckered
+    """
+    return reduce(flat_outer, diags)
 
 
 def tround(*args, **kwargs):
@@ -36,18 +133,48 @@ def logsumexp(x, axis=None):
     x_max = tt.max(x, axis=axis, keepdims=True)
     return tt.log(tt.sum(tt.exp(x - x_max), axis=axis, keepdims=True)) + x_max
 
+
 def logaddexp(a, b):
     diff = b - a
     return tt.switch(diff > 0,
-                    b + tt.log1p(tt.exp(-diff)),
-                    a + tt.log1p(tt.exp(diff)))
+                     b + tt.log1p(tt.exp(-diff)),
+                     a + tt.log1p(tt.exp(diff)))
+
+
+def logdiffexp(a, b):
+    """log(exp(a) - exp(b))"""
+    return a + log1mexp(a - b)
+
 
 def invlogit(x, eps=sys.float_info.epsilon):
+    """The inverse of the logit function, 1 / (1 + exp(-x))."""
     return (1. - 2. * eps) / (1. + tt.exp(-x)) + eps
 
 
 def logit(p):
     return tt.log(p / (floatX(1) - p))
+
+
+def log1pexp(x):
+    """Return log(1 + exp(x)), also called softplus.
+
+    This function is numerically more stable than the naive approach.
+    """
+    return tt.nnet.softplus(x)
+
+
+def log1mexp(x):
+    """Return log(1 - exp(-x)).
+
+    This function is numerically more stable than the naive approach.
+
+    For details, see
+    https://cran.r-project.org/web/packages/Rmpfr/vignettes/log1mexp-note.pdf
+    """
+    return tt.switch(
+        tt.lt(x, 0.683),
+        tt.log(-tt.expm1(-x)),
+        tt.log1p(-tt.exp(-x)))
 
 
 def flatten_list(tensors):
@@ -113,13 +240,13 @@ def expand_packed_triangular(n, packed, lower=True, diagonal_only=False):
 
     Parameters
     ----------
-    n : int
+    n: int
         The number of rows of the triangular matrix.
-    packed : theano.vector
+    packed: theano.vector
         The matrix in packed format.
-    lower : bool, default=True
+    lower: bool, default=True
         If true, assume that the matrix is lower triangular.
-    diagonal_only : bool
+    diagonal_only: bool
         If true, return only the diagonal of the matrix.
     """
     if packed.ndim != 1:
@@ -241,10 +368,10 @@ def block_diagonal(matrices, sparse=False, format='csr'):
 
     Parameters
     ----------
-    matrices : tensors
-    format : str (default 'csr')
+    matrices: tensors
+    format: str (default 'csr')
         must be one of: 'csr', 'csc'
-    sparse : bool (default False)
+    sparse: bool (default False)
         if True return sparse format
 
     Returns

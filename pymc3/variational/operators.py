@@ -1,3 +1,17 @@
+#   Copyright 2020 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
 from theano import tensor as tt
 from pymc3.theanof import change_flags
 from . import opvi
@@ -14,13 +28,33 @@ __all__ = [
 class KL(Operator):
     R"""**Operator based on Kullback Leibler Divergence**
 
+    This operator constructs Evidence Lower Bound (ELBO) objective
+
+    .. math::
+
+        ELBO_\beta = \log p(D|\theta) - \beta KL(q||p)
+
+    where
+
     .. math::
 
         KL[q(v)||p(v)] = \int q(v)\log\frac{q(v)}{p(v)}dv
+
+
+    Parameters
+    ----------
+    approx: :class:`Approximation`
+        Approximation used for inference
+    beta: float
+        Beta parameter for KL divergence, scales the regularization term.
     """
 
+    def __init__(self, approx, beta=1.):
+        Operator.__init__(self, approx)
+        self.beta = pm.floatX(beta)
+
     def apply(self, f):
-        return self.logq_norm - self.logp_norm
+        return -self.datalogp_norm + self.beta * (self.logq_norm - self.varlogp_norm)
 
 # SVGD Implementation
 
@@ -30,9 +64,9 @@ class KSDObjective(ObjectiveFunction):
 
     Parameters
     ----------
-    op : :class:`KSD`
+    op: :class:`KSD`
         OPVI Functional operator
-    tf : :class:`TestFunction`
+    tf: :class:`TestFunction`
         OPVI TestFunction
     """
 
@@ -74,8 +108,10 @@ class KSD(Operator):
 
     Parameters
     ----------
-    approx : :class:`Approximation`
+    approx: :class:`Approximation`
         Approximation used for inference
+    temperature: float
+        Temperature for Stein gradient
 
     References
     ----------

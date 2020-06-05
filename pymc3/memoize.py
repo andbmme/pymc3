@@ -1,22 +1,76 @@
+#   Copyright 2020 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
 import functools
 import pickle
+import collections
+from .util import biwrap
+CACHE_REGISTRY = []
 
 
-def memoize(obj):
+@biwrap
+def memoize(obj, bound=False):
     """
     An expensive memoizer that works with unhashables
     """
-    cache = obj.cache = {}
+    # this is declared not to be a bound method, so just attach new attr to obj
+    if not bound:
+        obj.cache = {}
+        CACHE_REGISTRY.append(obj.cache)
 
     @functools.wraps(obj)
     def memoizer(*args, **kwargs):
-        key = (hashable(args), hashable(kwargs))
-
+        if not bound:
+            key = (hashable(args), hashable(kwargs))
+            cache = obj.cache
+        else:
+            # bound methods have self as first argument, remove it to compute key
+            key = (hashable(args[1:]), hashable(kwargs))
+            if not hasattr(args[0], '_cache'):
+                setattr(args[0], '_cache', collections.defaultdict(dict))
+                # do not add to cache regestry
+            cache = getattr(args[0], '_cache')[obj.__name__]
         if key not in cache:
             cache[key] = obj(*args, **kwargs)
 
         return cache[key]
     return memoizer
+
+
+def clear_cache(obj=None):
+    if obj is None:
+        for c in CACHE_REGISTRY:
+            c.clear()
+    else:
+        if isinstance(obj, WithMemoization):
+            for v in getattr(obj, '_cache', {}).values():
+                v.clear()
+        else:
+            obj.cache.clear()
+
+
+class WithMemoization:
+    def __hash__(self):
+        return hash(id(self))
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('_cache', None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
 
 def hashable(a):

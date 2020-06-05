@@ -9,9 +9,11 @@ Continuous
    Flat
    HalfFlat
    Normal
+   TruncatedNormal
    HalfNormal
    SkewNormal
    Beta
+   Kumaraswamy
    Exponential
    Laplace
    StudentT
@@ -19,16 +21,19 @@ Continuous
    Cauchy
    HalfCauchy
    Gamma
+   InverseGamma 
    Weibull
    Lognormal
    ChiSquared
    Wald
    Pareto
-   InverseGamma
    ExGaussian
    VonMises
    Triangular
    Gumbel
+   Rice
+   Logistic
+   LogitNormal
    Interpolated
 
 .. automodule:: pymc3.distributions.continuous

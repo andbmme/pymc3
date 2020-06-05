@@ -1,4 +1,19 @@
+#   Copyright 2020 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
 import numbers
+import numpy as np
 from copy import copy
 
 import theano.tensor as tt
@@ -13,7 +28,7 @@ __all__ = ['Normal', 'StudentT', 'Binomial', 'Poisson', 'NegativeBinomial']
 # it as a method.
 
 
-class Identity():
+class Identity:
 
     def __call__(self, x):
         return x
@@ -24,7 +39,7 @@ inverse = tt.inv
 exp = tt.exp
 
 
-class Family(object):
+class Family:
     """Base class for Family of likelihood distribution and link functions.
     """
     priors = {}
@@ -44,14 +59,14 @@ class Family(object):
 
         Returns
         -------
-        dict : mapping name -> pymc3 distribution
+        dict: mapping name -> pymc3 distribution
         """
         if name:
             name = '{}_'.format(name)
         model = modelcontext(model)
         priors = {}
         for key, val in self.priors.items():
-            if isinstance(val, numbers.Number):
+            if isinstance(val, (numbers.Number, np.ndarray, np.generic)):
                 priors[key] = val
             else:
                 priors[key] = model.Var('{}{}'.format(name, key), val)
@@ -63,9 +78,9 @@ class Family(object):
 
         Parameters
         ----------
-        y_est : theano.tensor
+        y_est: theano.tensor
             Estimate of dependent variable
-        y_data : array
+        y_data: array
             Observed dependent variable
         """
         priors = self._get_priors(model=model, name=name)
@@ -77,8 +92,8 @@ class Family(object):
 
     def __repr__(self):
         return """Family {klass}:
-    Likelihood   : {likelihood}({parent})
-    Priors       : {priors}
+    Likelihood  : {likelihood}({parent})
+    Priors      : {priors}
     Link function: {link}.""".format(klass=self.__class__, likelihood=self.likelihood.__name__, parent=self.parent, priors=self.priors, link=self.link)
 
 
@@ -99,8 +114,9 @@ class Normal(Family):
 
 class Binomial(Family):
     link = logit
-    likelihood = pm_dists.Bernoulli
+    likelihood = pm_dists.Binomial
     parent = 'p'
+    priors = {'n': 1}
 
 
 class Poisson(Family):

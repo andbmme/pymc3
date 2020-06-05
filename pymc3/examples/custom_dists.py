@@ -24,7 +24,7 @@ xdata = np.random.normal(xdata, 10)
 ydata = np.random.normal(ydata, 10)
 data = {'x': xdata, 'y': ydata}
 
-# define loglikelihood outside of the model context, otherwise njobs wont work:
+# define loglikelihood outside of the model context, otherwise cores wont work:
 # Lambdas defined in local namespace are not picklable (see issue #1995)
 def loglike1(value):
     return -1.5 * tt.log(1 + value**2)
@@ -32,15 +32,15 @@ def loglike2(value):
     return -tt.log(tt.abs_(value))
 
 with pm.Model() as model:
-    alpha = pm.Normal('intercept', mu=0, sd=100)
+    alpha = pm.Normal('intercept', mu=0, sigma=100)
     # Create custom densities
     beta = pm.DensityDist('slope', loglike1, testval=0)
     sigma = pm.DensityDist('sigma', loglike2, testval=1)
     # Create likelihood
     like = pm.Normal('y_est', mu=alpha + beta *
-                        xdata, sd=sigma, observed=ydata)
+                        xdata, sigma=sigma, observed=ydata)
 
-    trace = pm.sample(2000, njobs=2)
+    trace = pm.sample(2000, cores=2)
 
 
 #################################################

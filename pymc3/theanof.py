@@ -1,3 +1,17 @@
+#   Copyright 2020 The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
 import numpy as np
 import theano
 from theano import theano, scalar, tensor as tt
@@ -8,8 +22,7 @@ from theano.sandbox.rng_mrg import MRG_RandomStreams
 
 from .blocking import ArrayOrdering
 from .data import GeneratorAdapter
-from .memoize import memoize
-from .vartypes import typefilter, continuous_types
+from .vartypes import typefilter, continuous_types, int_types
 
 __all__ = ['gradient',
            'hessian',
@@ -17,6 +30,7 @@ __all__ = ['gradient',
            'inputvars',
            'cont_inputs',
            'floatX',
+           'intX',
            'smartfloatX',
            'jacobian',
            'CallableTensor',
@@ -24,7 +38,8 @@ __all__ = ['gradient',
            'make_shared_replacements',
            'generator',
            'set_tt_rng',
-           'tt_rng']
+           'tt_rng',
+           'take_along_axis']
 
 
 def inputvars(a):
@@ -33,11 +48,11 @@ def inputvars(a):
 
     Parameters
     ----------
-        a : theano variable
+        a: theano variable
 
     Returns
     -------
-        r : list of tensor variables that are inputs
+        r: list of tensor variables that are inputs
     """
     return [v for v in inputs(makeiter(a)) if isinstance(v, tt.TensorVariable)]
 
@@ -48,11 +63,11 @@ def cont_inputs(f):
 
     Parameters
     ----------
-        a : theano variable
+        a: theano variable
 
     Returns
     -------
-        r : list of tensor variables that are continuous inputs
+        r: list of tensor variables that are continuous inputs
     """
     return typefilter(inputvars(f), continuous_types)
 
@@ -68,9 +83,27 @@ def floatX(X):
         return np.asarray(X, dtype=theano.config.floatX)
 
 
+_conversion_map = {'float64': 'int32',
+                   'float32': 'int16',
+                   'float16': 'int8',
+                   'float8': 'int8'}
+
+
+def intX(X):
+    """
+    Convert a theano tensor or numpy array to theano.tensor.int32 type.
+    """
+    intX = _conversion_map[theano.config.floatX]
+    try:
+        return X.astype(intX)
+    except AttributeError:
+        # Scalar passed
+        return np.asarray(X, dtype=intX)
+
+
 def smartfloatX(x):
     """
-    Convert non int types to floatX 
+    Converts numpy float values to floatX and leaves values of other types unchanged.
     """
     if str(x.dtype).startswith('float'):
         x = floatX(x)
@@ -85,10 +118,10 @@ def gradient1(f, v):
     """flat gradient of f wrt v"""
     return tt.flatten(tt.grad(f, v, disconnected_inputs='warn'))
 
+
 empty_gradient = tt.zeros(0, dtype='float32')
 
 
-@memoize
 def gradient(f, vars=None):
     if vars is None:
         vars = cont_inputs(f)
@@ -110,7 +143,6 @@ def jacobian1(f, v):
     return theano.map(grad_i, idx)[0]
 
 
-@memoize
 def jacobian(f, vars=None):
     if vars is None:
         vars = cont_inputs(f)
@@ -132,7 +164,6 @@ def jacobian_diag(f, x):
                        name='jacobian_diag')[0]
 
 
-@memoize
 @change_flags(compute_test_value='ignore')
 def hessian(f, vars=None):
     return -jacobian(gradient(f, vars), vars)
@@ -149,7 +180,6 @@ def hessian_diag1(f, v):
     return theano.map(hess_ii, idx)[0]
 
 
-@memoize
 @change_flags(compute_test_value='ignore')
 def hessian_diag(f, vars=None):
     if vars is None:
@@ -184,7 +214,7 @@ class IdentityOp(scalar.UnaryScalarOp):
         return "{z} = {x};".format(x=inp[0], z=out[0])
 
     def __eq__(self, other):
-        return type(self) == type(other)
+        return isinstance(self, type(other))
 
     def __hash__(self):
         return hash(type(self))
@@ -199,8 +229,8 @@ def make_shared_replacements(vars, model):
 
     Parameters
     ----------
-    vars : list of variables not to make shared
-    model : model
+    vars: list of variables not to make shared
+    model: model
 
     Returns
     -------
@@ -216,14 +246,14 @@ def join_nonshared_inputs(xs, vars, shared, make_shared=False):
 
     Parameters
     ----------
-    xs : list of theano tensors
-    vars : list of variables to join
+    xs: list of theano tensors
+    vars: list of variables to join
 
     Returns
     -------
     tensors, inarray
-    tensors : list of same tensors but with inarray as input
-    inarray : vector of inputs
+    tensors: list of same tensors but with inarray as input
+    inarray: vector of inputs
     """
     if not vars:
         raise ValueError('Empty list of variables.')
@@ -258,7 +288,7 @@ def reshape_t(x, shape):
         return x[0]
 
 
-class CallableTensor(object):
+class CallableTensor:
     """Turns a symbolic variable with one input into a function that returns symbolic arguments
     with the one variable replaced with the input.
     """
@@ -271,10 +301,11 @@ class CallableTensor(object):
 
         Parameters
         ----------
-        input : TensorVariable
+        input: TensorVariable
         """
         oldinput, = inputvars(self.tensor)
         return theano.clone(self.tensor, {oldinput: input}, strict=False)
+
 
 scalar_identity = IdentityOp(scalar.upgrade_to_float, name='scalar_identity')
 identity = tt.Elemwise(scalar_identity, name='identity')
@@ -286,22 +317,22 @@ class GeneratorOp(Op):
 
     __call__ creates TensorVariable
         It has 2 new methods
-        - var.set_gen(gen) : sets new generator
-        - var.set_default(value) : sets new default value (None erases default value)
+        - var.set_gen(gen): sets new generator
+        - var.set_default(value): sets new default value (None erases default value)
 
     If generator is exhausted, variable will produce default value if it is not None,
     else raises `StopIteration` exception that can be caught on runtime.
 
     Parameters
     ----------
-    gen : generator that implements __next__ (py3) or next (py2) method
+    gen: generator that implements __next__ (py3) or next (py2) method
         and yields np.arrays with same types
-    default : np.array with the same type as generator produces
+    default: np.array with the same type as generator produces
     """
     __props__ = ('generator',)
 
     def __init__(self, gen, default=None):
-        super(GeneratorOp, self).__init__()
+        super().__init__()
         if not isinstance(gen, GeneratorAdapter):
             gen = GeneratorAdapter(gen)
         self.generator = gen
@@ -350,16 +381,16 @@ def generator(gen, default=None):
 
     Parameters
     ----------
-    gen : generator that implements __next__ (py3) or next (py2) method
+    gen: generator that implements __next__ (py3) or next (py2) method
         and yields np.arrays with same types
-    default : np.array with the same type as generator produces
+    default: np.array with the same type as generator produces
 
     Returns
     -------
     TensorVariable
         It has 2 new methods
-        - var.set_gen(gen) : sets new generator
-        - var.set_default(value) : sets new default value (None erases default value)
+        - var.set_gen(gen): sets new generator
+        - var.set_default(value): sets new default value (None erases default value)
     """
     return GeneratorOp(gen, default)()
 
@@ -373,7 +404,7 @@ def tt_rng(random_seed=None):
 
     Parameters
     ----------
-    random_seed : int
+    random_seed: int
         If not None
         returns *new* theano random generator without replacing package global one
 
@@ -396,7 +427,7 @@ def set_tt_rng(new_rng):
 
     Parameters
     ----------
-    new_rng : `theano.sandbox.rng_mrg.MRG_RandomStreams` instance
+    new_rng: `theano.sandbox.rng_mrg.MRG_RandomStreams` instance
         The random number generator to use.
     """
     # pylint: disable=global-statement
@@ -465,3 +496,58 @@ def largest_common_dtype(tensors):
     return np.stack([np.ones((), dtype=dtype) for dtype in dtypes]).dtype
 
 
+def _make_along_axis_idx(arr_shape, indices, axis):
+    # compute dimensions to iterate over
+    if str(indices.dtype) not in int_types:
+        raise IndexError('`indices` must be an integer array')
+    shape_ones = (1,) * indices.ndim
+    dest_dims = list(range(axis)) + [None] + list(range(axis+1, indices.ndim))
+
+    # build a fancy index, consisting of orthogonal aranges, with the
+    # requested index inserted at the right location
+    fancy_index = []
+    for dim, n in zip(dest_dims, arr_shape):
+        if dim is None:
+            fancy_index.append(indices)
+        else:
+            ind_shape = shape_ones[:dim] + (-1,) + shape_ones[dim+1:]
+            fancy_index.append(tt.arange(n).reshape(ind_shape))
+
+    return tuple(fancy_index)
+
+
+def take_along_axis(arr, indices, axis=0):
+    """Take values from the input array by matching 1d index and data slices.
+
+    This iterates over matching 1d slices oriented along the specified axis in
+    the index and data arrays, and uses the former to look up values in the
+    latter. These slices can be different lengths.
+
+    Functions returning an index along an axis, like argsort and argpartition,
+    produce suitable indices for this function.
+    """
+    arr = tt.as_tensor_variable(arr)
+    indices = tt.as_tensor_variable(indices)
+    # normalize inputs
+    if axis is None:
+        arr = arr.flatten()
+        arr_shape = (len(arr),)  # flatiter has no .shape
+        _axis = 0
+    else:
+        if axis < 0:
+            _axis = arr.ndim + axis
+        else:
+            _axis = axis
+        if _axis < 0 or _axis >= arr.ndim:
+            raise ValueError(
+                "Supplied `axis` value {} is out of bounds of an array with "
+                "ndim = {}".format(axis, arr.ndim)
+            )
+        arr_shape = arr.shape
+    if arr.ndim != indices.ndim:
+        raise ValueError(
+            "`indices` and `arr` must have the same number of dimensions"
+        )
+
+    # use the fancy index
+    return arr[_make_along_axis_idx(arr_shape, indices, _axis)]
